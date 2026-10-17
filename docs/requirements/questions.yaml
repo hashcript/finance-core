@@ -1,0 +1,60 @@
+questions:
+  - id: Q-01
+    text: "How should the system confirm that a POST to /mpesa/callback really comes from Safaricom: an IP allowlist, a secret token in the callback URL, mutual TLS, or re-checking each result with Daraja's STK Query API before crediting?"
+    source: "src/mpesa/mpesa.controller.ts:16-21; src/mpesa/mpesa.service.ts:228-284 (R-08, R-13)"
+    blocking: true
+    assumption: "Today any caller who can reach the URL can credit any registered wallet with any amount. We assume callback authentication is required before production and that crediting should not trust the body alone."
+
+  - id: Q-02
+    text: "Should starting an STK Push create a PENDING Transaction (CheckoutRequestID, phone, expected amount), so that the callback updates it to COMPLETED or FAILED and the callback amount and phone are checked against what was requested?"
+    source: "prisma/schema.prisma:22-26 (PENDING/FAILED unused); src/ledger/ledger.service.ts:55; src/mpesa/mpesa.service.ts:175-226 (R-07, R-10, R-15)"
+    blocking: true
+    assumption: "The TransactionStatus enum suggests this lifecycle was intended. We assume the current approach (nothing stored at initiation, a COMPLETED row only on success) is an interim step."
+
+  - id: Q-03
+    text: "When a successful M-Pesa payment arrives for a phone with no registered user or no wallet, what should happen: acknowledge with 200 and post to a suspense/unallocated account, auto-create a user, or reject? And should failed payments (ResultCode != 0) be stored for audit?"
+    source: "src/mpesa/mpesa.service.ts:152-173 (R-12); README.md:181-185"
+    blocking: true
+    assumption: "The current behaviour (404, no ledger write) is a known gap that the planned reconciliation work (README Day 7) will cover. Money for unknown phones goes unrecorded until then."
+
+  - id: Q-04
+    text: "Who calls POST /mpesa/stk-push (a mobile app acting for a logged-in user, or an internal service), and how should they be authenticated and authorised? Should a customer be able to start a push only to their own phone number?"
+    source: "src/mpesa/mpesa.controller.ts:11-14; prisma/schema.prisma:38 (User.password with no auth code) (R-03)"
+    blocking: false
+    assumption: "Assumed to be a trusted client behind some gateway. There is no auth in the code, and User.password suggests user login is planned."
+
+  - id: Q-05
+    text: "Should the developer test endpoints (/idempotency-test, /ledger-test, /mpesa-test, especially GET /mpesa-test/token, which returns the live Daraja access token) be removed or limited to non-production environments?"
+    source: "src/app.module.ts:19-24; src/mpesa-test/mpesa-test.controller.ts:14-18 (R-20)"
+    blocking: false
+    assumption: "They are development scaffolding and will be excluded from any deployed build."
+
+  - id: Q-06
+    text: "What are the accounting rules: is WALLET a liability and MPESA_SETTLEMENT an asset (so deposit = DR settlement / CR wallet)? How should a balance be computed per account type? Is a platform fee charged on deposits, and at what rate?"
+    source: "src/mpesa/mpesa.service.ts:262-274; src/ledger-test/ledger-test.controller.ts:11-15; prisma/schema.prisma:16-20 (R-13, R-16)"
+    blocking: false
+    assumption: "Standard custodial-wallet conventions apply. No fee on M-Pesa deposits for now (the 5% fee exists only in the ledger-test example)."
+
+  - id: Q-07
+    text: "Is KES the only currency, and must amounts be whole shillings? Should the API reject fractional amounts (Daraja expects integers) and amounts with more than two decimal places?"
+    source: "src/mpesa/dto/initiateSTK.dto.ts:8-10; prisma/schema.prisma:83 (R-03, R-21)"
+    blocking: false
+    assumption: "Single currency (KES). There is no currency column. Whole-shilling amounts at the M-Pesa boundary."
+
+  - id: Q-08
+    text: "How are users and their wallet accounts created, and in what canonical format is User.phone_number stored (for example 2547XXXXXXXX)? Is exactly one wallet per user guaranteed?"
+    source: "src/mpesa/mpesa.service.ts:152-173 (callback PhoneNumber matched by exact string); prisma/schema.prisma:33-58 (R-12, R-19)"
+    blocking: false
+    assumption: "Users are seeded manually for now and phone numbers are stored as 2547XXXXXXXX, the same as Daraja's callback. One wallet per user by convention."
+
+  - id: Q-09
+    text: "What are the availability and scale targets (requests per second, number of API instances, a single Redis or a cluster), and what should happen to callbacks when Redis is down?"
+    source: "src/idempotency/idempotency.service.ts (single Redis client); README.md:67 (two-Redis-box risk) (R-18, R-23)"
+    blocking: false
+    assumption: "A single API instance and a single Redis instance. If Redis is unavailable, callbacks fail with 500 and depend on Safaricom retrying. The DB unique constraint on checkoutRequestId remains the final duplicate guard."
+
+  - id: Q-10
+    text: "If processing a callback fails (for example user not found or a DB error), should the idempotency key be released straight away so a retry is processed, or is the current 30-second lockout followed by reprocessing the intended behaviour? What does Safaricom actually do when a callback gets a non-2xx response?"
+    source: "src/idempotency/interceptor/mpesaCallback.idempotency.interceptor.ts:35-47 (R-09, R-23)"
+    blocking: false
+    assumption: "The current behaviour is accepted: a failed claim stays 'processing' until its 30 s TTL ends, and then a retry is treated as new."
